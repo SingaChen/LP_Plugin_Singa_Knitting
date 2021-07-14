@@ -46,7 +46,6 @@ public:
     bool comDistanceField();
     bool isoCurveGeneration();
     bool courseGeneration();
-    bool knittingMapGeneration();
     bool knittingMapgeneration_new();
 
 public slots:
@@ -85,11 +84,11 @@ private:
     std::vector<std::vector<std::vector<float>>>oriEdgePoint;
     std::vector<std::vector<float>>oriEdgeRatio;
     std::vector<std::vector<QMap<uint,uint>>>isoNodeSequence;
+    std::vector<std::vector<std::vector<float>>> firstNormal;
     std::vector<std::vector<std::vector<std::vector<float>>>>isoCurveNode;
     std::vector<std::vector<std::vector<std::vector<float>>>>isoCurveNode_resampled;
     std::vector<std::vector<std::vector<std::vector<std::vector<int>>>>> relatedNode;
-    std::vector<std::vector<std::vector<std::vector<std::vector<int>>>>> relatedNode_assist;
-    std::vector<std::vector<std::vector<float>>> firstNormal;
+    std::vector<std::vector<std::vector<std::vector<std::vector<int>>>>> relatedNode_assist;    
     std::vector<std::vector<int>> knittingMapArray;
     bool isoCurveMode = false;
     bool knittingMapMode = false;

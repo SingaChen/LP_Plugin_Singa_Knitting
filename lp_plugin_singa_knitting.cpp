@@ -77,7 +77,7 @@ QWidget *LP_Plugin_Singa_Knitting::DockUi()
     mDis = new QDoubleSpinBox(mWidget.get());
     mDis->setSingleStep(0.01);
     mDis->setMaximumWidth(60);
-    mDis->setValue(1);
+    mDis->setValue(3);
     QPushButton *buttonIsoCurve = new QPushButton(tr("Iso-Curve Generation"),mWidget.get());
     buttonIsoCurve->setMaximumWidth(200);
     buttonIsoCurve->setContentsMargins(2,0,2,0);
@@ -93,6 +93,7 @@ QWidget *LP_Plugin_Singa_Knitting::DockUi()
     mDis_course = new QDoubleSpinBox(mWidget.get());
     mDis_course->setSingleStep(0.01);
     mDis_course->setMaximumWidth(60);
+    mDis_course->setValue(1);
     QPushButton *buttonCourse = new QPushButton(tr("Courses Generation"),mWidget.get());
     buttonCourse->setMaximumWidth(200);
     buttonCourse->setContentsMargins(2,0,2,0);
@@ -135,9 +136,8 @@ QWidget *LP_Plugin_Singa_Knitting::DockUi()
         emit glUpdateRequest();
         });
     connect(buttonIsoCurve, &QPushButton::clicked,[this](){
-        isoCurveGeneration();
-        mDis_course->setValue(2);
-        mDis->setEnabled(false);
+        isoCurveGeneration();        
+        //mDis->setEnabled(false);
         emit glUpdateRequest();
         });
     connect(buttonCourse, &QPushButton::clicked,[this](){
@@ -188,7 +188,6 @@ bool LP_Plugin_Singa_Knitting::comDistanceField()
     auto i_it = Faces.begin();
     for ( const auto &f : sf_mesh->faces()){
         for ( const auto &v : f.vertices()){
-            //Faces.emplace_back(v.idx());
             (*i_it++) = v.idx();
         }
     }
@@ -246,16 +245,19 @@ bool LP_Plugin_Singa_Knitting::comDistanceField()
 
 bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
 {
-
+    isoNodeSequence.clear();
+    oriEdgePoint.clear();
+    oriEdgeSet.clear();
+    oriEdgeRatio.clear();
+    firstNormal.clear();
+    isoCurveNode.clear();
+    isoEdgeSet.clear();
     if(maxDis==0) return false;
     double isoLength = mDis->value();
     ocolor.clear();
     field_color.clear();
-    //fieldMode = false;
     isoCurveMode = true;
-    double isoValue;
-    isoValue= isoLength/maxDis;
-    int isoNum = 1/isoValue+0.5;
+    int isoNum = floor(maxDis/isoLength-0.25)+1;
     static auto _isMesh = [](LP_Objectw obj){
         if ( obj.expired()){
             return LP_OpenMeshw();
@@ -265,19 +267,20 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
     if(!mObject.lock()) return false;
     auto c = _isMesh(mObject).lock();
     auto sf_mesh = c->Mesh();
+    //qDebug()<<"Initial Completed"<<isoNum;
     for(int i =0;i<isoNum;i++)
     {
-        double length = (i+0.5)*isoLength;
+        double length = (i+0.25)*isoLength;
         std::vector<std::vector<float>> oriEdgeList;
         std::vector<float> oriRationList;
         std::vector<QMap<uint,uint>> singleEdge;
         QMap<uint,uint> edgeSet;
+        //---------offset the point -----------//
         for(int j = 0;j<sf_mesh->n_vertices();j++)
         {
             if (point_distance[j]==length)
                 point_distance[j]+=0.0001;
         }
-
         for (auto e_it=sf_mesh->edges_begin();e_it!=sf_mesh->edges_end() ; ++e_it)
         {
             if((point_distance[e_it->vertex(0).idx()]>length && point_distance[e_it->vertex(1).idx()]<length)||(point_distance[e_it->vertex(0).idx()]<length && point_distance[e_it->vertex(1).idx()]>length))
@@ -382,9 +385,9 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
         }
         //qDebug()<<"The number of No. "<< i <<" connected curves is: "<<singleEdge.size();
         isoNodeSequence.push_back(singleEdge);
-
     }
-    //Calculate the isoNode
+    //qDebug()<<"Edges Selection Completed"<<isoNodeSequence.size();
+    //----------Calculate the isoNode-----------//
     for(int i =0;i<isoNodeSequence.size();i++)
     {
         std::vector<std::vector<std::vector<float>>>isoCurveNode_1;
@@ -424,9 +427,9 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
         firstNormal.emplace_back(firstNormal_1);
         isoCurveNode.emplace_back(isoCurveNode_1);
     }
-//    return false;
+    //qDebug()<<"isoNode Calculation Completed"<<isoNodeSequence.size();
 
-    //smooth the curves and delete the short curves(Nodenum<=3)
+    //-----------smooth & delete & resample------------//
     for(int i =0;i<isoCurveNode.size();i++)
     {
         for(int j = 0;j<isoCurveNode[i].size();j++)
@@ -465,13 +468,57 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
                 isoCurveNode[i].erase(isoCurveNode[i].begin()+j);
             }
         }
-    }
+    }    
+    std::vector<std::vector<std::vector<std::vector<float>>>>isoCurveNode_Tem;
+    isoCurveNode_Tem.resize(isoCurveNode.size());
+    float disResample = mDis_course->value()*mDis->value();
 
-    //redirect the curves
+    for(int i =0;i<isoCurveNode.size();i++)
+    {
+        isoCurveNode_Tem[i].resize(isoCurveNode[i].size());
+        for(int j = 0;j<isoCurveNode[i].size();j++)
+        {
+            float length = 0;
+            for(int k = 0;k<isoCurveNode[i][j].size()-1;k++)
+            {
+                float a = 0;
+                for(int l = 0;l<3;l++)
+                    a+=pow(isoCurveNode[i][j][k][l]-isoCurveNode[i][j][k+1][l],2);
+                a = sqrt(a);
+                length +=a;
+            }
+            isoCurveNode_Tem[i][j].resize(round(length/disResample)+1);
+            isoCurveNode_Tem[i][j][0] = isoCurveNode[i][j][0];
+            for(int k =1; k<isoCurveNode_Tem[i][j].size()-1; k++)
+            {
+                float new_disResample = k * length/(isoCurveNode_Tem[i][j].size()-1);
+                float distance = 0;
+                for(int l = 0;l < isoCurveNode[i][j].size()-1;l++)
+                {
+                    distance+=sqrt(pow(isoCurveNode[i][j][l+1][0]-isoCurveNode[i][j][l][0],2)+pow(isoCurveNode[i][j][l+1][1]-isoCurveNode[i][j][l][1],2)+pow(isoCurveNode[i][j][l+1][2]-isoCurveNode[i][j][l][2],2));
+                    if(distance>new_disResample)
+                    {
+                        float prevDis = distance-sqrt(pow(isoCurveNode[i][j][l+1][0]-isoCurveNode[i][j][l][0],2)+pow(isoCurveNode[i][j][l+1][1]-isoCurveNode[i][j][l][1],2)+pow(isoCurveNode[i][j][l+1][2]-isoCurveNode[i][j][l][2],2));
+                        float ratio = (new_disResample-prevDis)/(distance-prevDis);
+                        std::vector<float> newNode;
+                        for(int m = 0;m<3;m++)
+                            newNode.emplace_back((1-ratio)*isoCurveNode[i][j][l][m]+ratio*isoCurveNode[i][j][l+1][m]);
+                        isoCurveNode_Tem[i][j][k] = newNode;
+                        break;
+                    }
+                }
+            }
+            isoCurveNode_Tem[i][j][isoCurveNode_Tem[i][j].size()-1] = isoCurveNode[i][j][isoCurveNode[i][j].size()-1];
+        }
+    }
+    isoCurveNode.clear();
+    isoCurveNode.swap(isoCurveNode_Tem);
+    //-----------redirect the curves---------//
     if(isoCurveNode.size()<=1){qDebug()<<"The number of IsoCurve is less than 2";return false;}
     std::vector<float>crossDot;
     for(int i = 0;i<isoCurveNode.size();i++)
     {
+        //qDebug()<<i;
         for(int j = 0;j<isoCurveNode[i].size();j++)
         {
             auto referNormal = firstNormal[i][j];
@@ -498,6 +545,7 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
                         {
                             distance+=pow((nextNode[m]-n0[m]),2);
                         }
+                        distance = sqrt(distance);
                         if(distance<minDistance)
                         {
                             n2.clear();
@@ -508,9 +556,10 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
                     }
                 }
                 for(int k = 0;k<3;k++)
-                     v1.emplace_back(n0[k]-n2[k]);
+                     v1.emplace_back(n2[k]-n0[k]);
             }
-            if(minDistance>2*isoLength||i==isoCurveNode.size()-1)
+            //qDebug()<<"minDistance:"<<minDistance<<"isoLength:"<<isoLength;
+            if(minDistance>3*isoLength||i==isoCurveNode.size()-1)
             {
                 minDistance=99999.9;
                 for(int k = 0;k<isoCurveNode[i-1].size();k++)
@@ -524,7 +573,8 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
                         for(int m = 0;m<3;m++)
                         {
                             distance+=pow((nextNode[m]-n0[m]),2);
-                        }
+                        }                        
+                        distance = sqrt(distance);
                         if(distance<minDistance)
                         {
                             n2.clear();
@@ -535,12 +585,9 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
                         }
                     }
                 }
-                //qDebug()<<"1321"<<n2;
                 v1.clear();
-                //qDebug()<<"1321"<<n2;
                 for(int k = 0;k<3;k++)
-                     v1.emplace_back(n2.data()[k]-n0.data()[k]);
-
+                     v1.emplace_back(n0[k]-n2[k]);
             }
 
             std::vector<float>thisCrossDot;
@@ -551,10 +598,15 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
             for(int k = 0;k<3;k++)
             result+=thisCrossDot[k]*referNormal[k];
             if(result<0)
+            {
                 std::reverse(isoCurveNode[i][j].begin(),isoCurveNode[i][j].end());
+                //qDebug()<<"REVERSE:"<<i<<j;
+            }
         }
     }
-    //unify the curves
+    //qDebug()<<"Redirection Completed"<<isoCurveNode.size();
+    //return false;
+    //-----------unify the curves----------//
     //step1: detect the first isoCurve which is conducted at the begining
     //step2: sort the rest isoCurves
     std::vector<std::vector<std::vector<int>>> nearestNodeIdx;
@@ -633,80 +685,35 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
 
 bool LP_Plugin_Singa_Knitting::courseGeneration()
 {
-    float gap = mDis_course->value()*mDis->value();
-    std::vector<std::vector<float>> curveLength;
+    relatedNode.clear();
+    relatedNode_assist.clear();
+    isoCurveNode_resampled.swap(isoCurveNode);
 
-    for(int i =0;i<isoCurveNode.size();i++)
+    relatedNode.resize(isoCurveNode_resampled.size());
+    relatedNode_assist.resize(isoCurveNode_resampled.size());
+    for(int i =0;i<isoCurveNode_resampled.size();i++)
     {
-        std::vector<float> curveLength_1;
-        for(int j =0;j<isoCurveNode[i].size();j++)
+        relatedNode[i].resize(isoCurveNode_resampled[i].size());
+        relatedNode_assist[i].resize(isoCurveNode_resampled[i].size());
+        for(int j =0;j<isoCurveNode_resampled[i].size();j++)
         {
-            float curveLength_2 = 0;
-            for(int k = 0;k<isoCurveNode[i][j].size()-1;k++)
+            relatedNode_assist[i][j].resize(isoCurveNode_resampled[i][j].size());
+            relatedNode[i][j].resize(isoCurveNode_resampled[i][j].size());
+            for(int k = 0;k<isoCurveNode_resampled[i][j].size();k++)
             {
-                std::vector<float> v;
-                for(int l = 0;l<3;l++)
-                {
-                    v.emplace_back(isoCurveNode[i][j][k+1][l]-isoCurveNode[i][j][k][l]);
-                }
-                curveLength_2+=sqrt(pow(v[0],2)+pow(v[1],2)+pow(v[2],2));
+                relatedNode_assist[i][j][k].resize(0);
+                relatedNode[i][j][k].resize(0);
             }
-            //if(curveLength_2<0.5*gap) isoCurveNode[i].erase(isoCurveNode[i].begin()+j);
-            curveLength_1.emplace_back(curveLength_2);
-        }
-        //if(isoCurveNode[i].size()==0)isoCurveNode.erase(isoCurveNode.begin()+i);
-        curveLength.emplace_back(curveLength_1);
-    }
-
-    relatedNode.resize(curveLength.size());
-    isoCurveNode_resampled.resize(curveLength.size());
-    relatedNode_assist.resize(curveLength.size());
-    for(int i =0;i<curveLength.size();i++)
-    {
-        relatedNode[i].resize(curveLength[i].size());
-        isoCurveNode_resampled[i].resize(curveLength[i].size());
-        relatedNode_assist[i].resize(curveLength[i].size());
-        //qDebug()<<curveLength[i].size()<<relatedNode[i].size()<<isoCurveNode_resampled[i].size();
-        for(int j =0;j<curveLength[i].size();j++)
-        {
-            if(curveLength[i][j]<gap) relatedNode[i][j].resize(2);
-            else relatedNode[i][j].resize(round(curveLength[i][j]/gap)+1);
-            relatedNode_assist[i][j].resize(relatedNode[i][j].size());
-            //qDebug()<<isoCurveNode[i][j].size()<<curveLength[i][j]<<int(curveLength[i][j]/gap)+1<<relatedNode[i][j].size();
-            isoCurveNode_resampled[i][j].emplace_back(isoCurveNode[i][j][0]);
-            for(int k =1; k<relatedNode[i][j].size()-1; k++)
-            {
-                float new_gap = k * curveLength[i][j]/(relatedNode[i][j].size()-1);
-                float distance = 0;
-                for(int l = 0;l < isoCurveNode[i][j].size()-1;l++)
-                {
-                    distance+=sqrt(pow(isoCurveNode[i][j][l+1][0]-isoCurveNode[i][j][l][0],2)+pow(isoCurveNode[i][j][l+1][1]-isoCurveNode[i][j][l][1],2)+pow(isoCurveNode[i][j][l+1][2]-isoCurveNode[i][j][l][2],2));
-                    if(distance>new_gap)
-                    {
-                        float prevDis = distance-sqrt(pow(isoCurveNode[i][j][l+1][0]-isoCurveNode[i][j][l][0],2)+pow(isoCurveNode[i][j][l+1][1]-isoCurveNode[i][j][l][1],2)+pow(isoCurveNode[i][j][l+1][2]-isoCurveNode[i][j][l][2],2));
-                        float ratio = (new_gap-prevDis)/(distance-prevDis);
-                        std::vector<float> newNode;
-                        for(int m = 0;m<3;m++)
-                            newNode.emplace_back((1-ratio)*isoCurveNode[i][j][l][m]+ratio*isoCurveNode[i][j][l+1][m]);
-                        isoCurveNode_resampled[i][j].emplace_back(newNode);
-                        break;
-                    }
-                }
-            }
-            isoCurveNode_resampled[i][j].emplace_back(isoCurveNode[i][j][isoCurveNode[i][j].size()-1]);
-            //qDebug()<<isoCurveNode[i][j].size()<<curveLength[i][j]<<isoCurveNode_resampled[i][j].size()<<relatedNode[i][j].size();
         }
     }
-
     //connect courses
-
     for(int i =0; i<isoCurveNode_resampled.size();i++)
     {
+        //if(i==9) break;
         for(int j = 0;j<isoCurveNode_resampled[i].size();j++)
         {
-            if(i!=0)
+            if(i!=0)//connect downside
             {
-                //connect down
                 for(int k = 0;k<isoCurveNode_resampled[i][j].size();k++)
                 {
                     if(relatedNode_assist[i][j][k].size()>0) continue;
@@ -715,34 +722,34 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
                     std::vector<int> idx_self;
                     idx_self.emplace_back(j);
                     idx_self.emplace_back(k);
-                    float minDistance = 3*gap;
+                    float minDistance = 3 * mDis->value();
                     for(int jj = 0;jj<isoCurveNode_resampled[i-1].size();jj++)
                     {
                         for(int kk = 0;kk<isoCurveNode_resampled[i-1][jj].size();kk++)
                         {
+                            //qDebug()<<jj<<kk;
                             std::vector<float> nextNode;
-                            for(int m = 0;m<3;m++)
-                                nextNode.emplace_back(isoCurveNode_resampled[i-1][jj][kk][m]);
+                            nextNode = isoCurveNode_resampled[i-1][jj][kk];
+                            //qDebug()<<nextNode;
                             float distance = 0;
                             for(int m = 0;m<3;m++)
-                            {
                                 distance+=pow((nextNode[m]-n0[m]),2);
-                            }
+                            distance = sqrt(distance);
+                            //qDebug()<<distance<<minDistance;
                             bool isIntersection = false;
-                            for(int jjj = 0;jjj<jj;jjj++)
+                            for(int jjj = 0;jjj<j+1 && !isIntersection;jjj++)
                             {
-                                for(int kkk = 0;kkk<kk;kkk++)
+                                for(int kkk = 0;kkk<isoCurveNode_resampled[i][jjj].size() && !isIntersection;kkk++)
                                 {
-                                    for(int l = 0;l<relatedNode_assist[i][jjj][kkk].size();l++)
-                                        if(relatedNode_assist[i][jjj][kkk][l][0]>jj||relatedNode_assist[i][jjj][kkk][l][2]>kk)
-                                        {
+                                    if(jjj==j && kkk==k) break;
+                                    for(int l = 0;l<relatedNode_assist[i][jjj][kkk].size() && !isIntersection;l++)
+                                        if(relatedNode_assist[i][jjj][kkk][l][0]>jj||(relatedNode_assist[i][jjj][kkk][l][0]==jj&&relatedNode_assist[i][jjj][kkk][l][1]>kk))
                                             isIntersection = true;
-                                            break;
-                                        }
                                 }
                             }
                             if(distance<minDistance && !isIntersection)
                             {
+                                //qDebug()<<minDistance<<distance;
                                 idx.clear();
                                 minDistance = distance;
                                 idx.emplace_back(jj);
@@ -750,13 +757,17 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
                             }
                         }
                     }
-                    relatedNode[i-1][idx[0]][idx[1]].emplace_back(idx_self);
-                    relatedNode_assist[i][j][k].emplace_back(idx);
+                    if(!idx.empty())
+                    {
+                        //qDebug()<<i<<idx_self<<idx;
+                        relatedNode[i-1][idx[0]][idx[1]].emplace_back(idx_self);
+                        relatedNode_assist[i][j][k].emplace_back(idx);
+                    }
                 }
             }
-            if(i!=isoCurveNode_resampled.size()-1)
+            if(i!=isoCurveNode_resampled.size()-1)//connect upside
             {
-                //connect up
+                //qDebug()<<"-------------"<<i<<j<<"Up --------------";
                 for(int k = 0;k<isoCurveNode_resampled[i][j].size();k++)
                 {
                     std::vector<float>n0 = isoCurveNode_resampled[i][j][k];
@@ -764,19 +775,17 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
                     std::vector<int> idx_self;
                     idx_self.emplace_back(j);
                     idx_self.emplace_back(k);
-                    float minDistance = 3*gap;
+                    float minDistance = 3*mDis->value();
                     for(int jj = 0;jj<isoCurveNode_resampled[i+1].size();jj++)
                     {
                         for(int kk = 0;kk<isoCurveNode_resampled[i+1][jj].size();kk++)
                         {
                             std::vector<float> nextNode;
-                            for(int m = 0;m<3;m++)
-                                nextNode.emplace_back(isoCurveNode_resampled[i+1][jj][kk][m]);
+                            nextNode = isoCurveNode_resampled[i+1][jj][kk];
                             float distance = 0;
                             for(int m = 0;m<3;m++)
-                            {
                                 distance+=pow((nextNode[m]-n0[m]),2);
-                            }
+                            distance = sqrt(distance);
                             if(distance<minDistance)
                             {
                                 idx.clear();
@@ -795,465 +804,7 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
             }
         }
     }
-
-    return true;
-}
-
-bool LP_Plugin_Singa_Knitting::knittingMapGeneration()
-{
-    knittingMapMode = true;
-    std::vector<std::vector<int>> knittingMapLeft;
-    std::vector<std::vector<int>> knittingMapRight;
-    std::vector<std::vector<int>> nodeLength;
-    std::vector<std::vector<std::vector<int>>> relatedNodeUp_new;
-    std::vector<std::vector<std::vector<int>>> relatedNodeDown_new;
-    std::vector<std::vector<int>> result;
-    //re-assign the relatedNode
-    for(int i = 0;i<relatedNode.size();i++)
-    {
-        std::vector<std::vector<int>> rNode;
-        for(int j = 0;j<relatedNode[i].size();j++)
-        {
-            for(int k = 0;k<relatedNode[i][j].size();k++)
-            {
-                std::vector<int> rNode_1;
-                for(int l = 0;l<relatedNode[i][j][k].size();l++)
-                {
-                    if(relatedNode[i][j][k][l][0]!=0&&i!=relatedNode.size()-1)
-                    {
-                        rNode_1.emplace_back(relatedNode[i][j][k][l][1]+relatedNode[i+1][relatedNode[i][j][k][l][0]-1].size());
-                    }
-                    else if(relatedNode[i][j][k][l][0]!=0&&i==relatedNode.size()-1)
-                    {
-                        rNode_1.emplace_back(relatedNode[i][j][k][l][1]+relatedNode_assist[i][relatedNode[i][j][k][l][0]-1].size());
-                    }
-                    else
-                        rNode_1.emplace_back(relatedNode[i][j][k][l][1]);
-                }
-                rNode.emplace_back(rNode_1);
-            }
-        }
-        relatedNodeUp_new.emplace_back(rNode);
-    }
-    for(int i = 0;i<relatedNode_assist.size();i++)
-    {
-        std::vector<std::vector<int>> rNode;
-        for(int j = 0;j<relatedNode_assist[i].size();j++)
-        {
-            for(int k = 0;k<relatedNode_assist[i][j].size();k++)
-            {
-                std::vector<int> rNode_1;
-                for(int l = 0;l<relatedNode_assist[i][j][k].size();l++)
-                {
-                    if(relatedNode_assist[i][j][k][l][0]!=0 && i!=0)
-                        rNode_1.emplace_back(relatedNode_assist[i][j][k][l][1]+relatedNode_assist[i-1][relatedNode_assist[i][j][k][l][0]-1].size());
-                    else if(relatedNode_assist[i][j][k][l][0]!=0&&i==0)
-                    {
-                        rNode_1.emplace_back(relatedNode_assist[i][j][k][l][1]+relatedNode[i][relatedNode[i][j][k][l][0]-1].size());
-                    }
-                    else
-                        rNode_1.emplace_back(relatedNode_assist[i][j][k][l][1]);
-                }
-                rNode.emplace_back(rNode_1);
-            }
-        }
-        relatedNodeDown_new.emplace_back(rNode);
-    }
-    //Delete isolated Node
-    for(int i =0;i<relatedNodeUp_new.size();i++)
-    {
-        for(int j = 0;j<relatedNodeUp_new[i].size();j++)
-        {
-            if(relatedNodeUp_new[i][j].size()==0&&relatedNodeDown_new[i][j].size()==0)
-            {
-                qDebug()<<"There is an isolated Node--1";
-                relatedNodeDown_new[i].erase(relatedNodeDown_new[i].begin()+j);
-                relatedNodeUp_new[i].erase(relatedNodeUp_new[i].begin()+j);
-            }
-        }
-    }
-    //sort the Node
-    for(int i =0;i<relatedNodeUp_new.size();i++)
-    {
-        for(int j = 0;j<relatedNodeUp_new[i].size();j++)
-        {
-            if(relatedNodeUp_new[i][j].size()<=1) continue;
-            int a, b;
-            for (a = 0; a < relatedNodeUp_new[i][j].size() - 1; a++)
-                for (b = 0; b < relatedNodeUp_new[i][j].size() - 1 - a; b++)
-                    if (relatedNodeUp_new[i][j][b] > relatedNodeUp_new[i][j][b + 1])
-                        std::swap(relatedNodeUp_new[i][j][b], relatedNodeUp_new[i][j][b + 1]);
-        }
-        //qDebug()<<relatedNodeUp_new[i];
-    }
-    for(int i =0;i<relatedNodeDown_new.size();i++)
-    {
-        for(int j = 0;j<relatedNodeDown_new[i].size();j++)
-        {
-            if(relatedNodeDown_new[i][j].size()<=1) continue;
-            int a, b;
-            for (a = 0; a < relatedNodeDown_new[i][j].size() - 1; a++)
-                for (b = 0; b < relatedNodeDown_new[i][j].size() - 1 - a; b++)
-                    if (relatedNodeDown_new[i][j][b] > relatedNodeDown_new[i][j][b + 1])
-                        std::swap(relatedNodeDown_new[i][j][b], relatedNodeDown_new[i][j][b + 1]);
-        }
-    }
-
-    //Travel the Node(Get all branch);
-    int firstLength = 0;
-    for(int i = 0;i<relatedNodeUp_new.size();i++)
-    {
-        std::vector<int>nodeLength_1;
-        for(int j = 0;j<relatedNodeUp_new[i].size();j++)
-        {
-            int branchNum = 0;
-            std::vector<int>nextNode;
-            std::vector<int>nextNode_last;
-            for(int k = 0;k<relatedNodeUp_new[i][j].size();k++)
-                nextNode.emplace_back(relatedNodeUp_new[i][j][k]);
-            std::set<int>s(nextNode.begin(), nextNode.end());
-            nextNode.assign(s.begin(), s.end());
-            nextNode_last.emplace_back(j);
-            for(int a =i+1;a<relatedNodeUp_new.size();a++)
-            {
-                std::vector<int>nextNode_new;
-                nextNode_new.clear();
-                for(int k = 0;k<nextNode.size();k++)
-                {
-                    if(relatedNodeUp_new[a][nextNode[k]].size()==0) branchNum++;
-                    if(relatedNodeDown_new[a][nextNode[k]].size()>1)
-                    {
-                        for(int l = 0;l<relatedNodeDown_new[a][nextNode[k]].size();l++)
-                        {
-                            for(int m = 0;m<nextNode_last.size();m++)
-                            {
-                                if(nextNode_last[m]==relatedNodeDown_new[a][nextNode[k]][l]) branchNum++;
-                            }
-                        }
-                        branchNum--;
-                    }
-                    for(int l = 0;l<relatedNodeUp_new[a][nextNode[k]].size();l++)
-                        nextNode_new.emplace_back(relatedNodeUp_new[a][nextNode[k]][l]);
-                }
-                std::set<int>s1(nextNode_new.begin(), nextNode_new.end());
-                nextNode_new.assign(s1.begin(), s1.end());
-                nextNode_last.clear();
-                nextNode_last = nextNode;
-                nextNode.clear();
-                nextNode=nextNode_new;
-            }
-            nodeLength_1.emplace_back(branchNum);
-        }
-
-        int totalLength= 0;
-        if(i==0)
-            for(int j = 0;j<nodeLength_1.size();j++)
-            {
-                if(nodeLength_1[j]==0)
-                    firstLength++;
-                else
-                    firstLength+=nodeLength_1[j];
-            }
-        else
-        {
-            for(int j = 0;j<nodeLength_1.size();j++)
-            {
-                if(nodeLength_1[j]==0)
-                    totalLength++;
-                else
-                    totalLength+=nodeLength_1[j];
-            }
-            if(totalLength<firstLength)
-            {
-                nodeLength_1.clear();
-                for(int j = 0;j<relatedNodeDown_new[i].size();j++)
-                {
-                    int branchNum =0;
-                    std::vector<int>nextNode;
-                    std::vector<int>nextNode_last;
-                    for(int k = 0;k<relatedNodeDown_new[i][j].size();k++)
-                        nextNode.emplace_back(relatedNodeDown_new[i][j][k]);
-                    std::set<int>s(nextNode.begin(), nextNode.end());
-                    nextNode.assign(s.begin(), s.end());
-                    nextNode_last.emplace_back(j);
-                    for(int a =i-1;a>-1;a--)
-                    {
-                        std::vector<int>nextNode_new;
-                        nextNode_new.clear();
-                        for(int k = 0;k<nextNode.size();k++)
-                        {
-                            if(relatedNodeDown_new[a][nextNode[k]].size()==0) branchNum++;
-                            if(relatedNodeUp_new[a][nextNode[k]].size()>1)
-                            {
-                                for(int l = 0;l<relatedNodeUp_new[a][nextNode[k]].size();l++)
-                                {
-                                    for(int m = 0;m<nextNode_last.size();m++)
-                                    {
-                                        if(nextNode_last[m]==relatedNodeUp_new[a][nextNode[k]][l]) branchNum++;
-                                    }
-                                }
-                                branchNum--;
-                            }
-                            for(int l = 0;l<relatedNodeDown_new[a][nextNode[k]].size();l++)
-                                nextNode_new.emplace_back(relatedNodeDown_new[a][nextNode[k]][l]);
-                        }
-                        std::set<int>s1(nextNode_new.begin(), nextNode_new.end());
-                        nextNode_new.assign(s1.begin(), s1.end());
-                        nextNode_last.clear();
-                        nextNode_last = nextNode;
-                        nextNode.clear();
-                        nextNode=nextNode_new;
-                    }
-                    nodeLength_1.emplace_back(branchNum);
-                }
-            }
-        }
-
-        nodeLength.emplace_back(nodeLength_1);
-        totalLength= 0;
-        for(int j = 0;j<nodeLength_1.size();j++)
-        {
-            totalLength+=nodeLength_1[j];
-        }
-        qDebug()<<i<<nodeLength_1<<totalLength;
-
-    }
-    return false;
-    //Generate knitting map
-    for(int i=0;i<nodeLength.size();i++)
-    {
-        std::vector<int> knittingMapLeft_1;
-        std::vector<int> knittingMapRight_1;
-        int buff = 0;
-        bool intension = false;
-        for(int j = 0;j<nodeLength[i].size();j++)
-        {
-//-------------------------------Version 2 (June 16)-------------------------------------------------------
-            if(i>0 && relatedNodeDown_new[i][j].size()>0)
-            {
-                for(;;)
-                {
-                    if(knittingMapRight[i-1][knittingMapRight_1.size()]>=*std::min_element(relatedNodeDown_new[i][j].begin(),relatedNodeDown_new[i][j].end()))
-                    {
-                        if(!knittingMapRight_1.empty()&&knittingMapRight_1[knittingMapRight_1.size()-1]==-1&&knittingMapLeft_1[knittingMapLeft_1.size()-1]==-1)
-                        {
-                            if(intension) intension = false;
-                            else
-                            {
-                                knittingMapRight_1[knittingMapRight_1.size()-1]=-2;
-                                knittingMapLeft_1[knittingMapLeft_1.size()-1]=-2;
-                            }
-                        }
-                        break;
-                    }
-                    knittingMapRight_1.emplace_back(-1);
-                    knittingMapLeft_1.emplace_back(-1);
-                }
-            }
-            if(relatedNodeUp_new[i][j].size()==0&&i!=nodeLength.size()-1)
-            {
-                if(j-buff-1<0)
-                    for(int k = 0;k<relatedNodeDown_new[i][j].size();k++)
-                    {
-                        knittingMapRight_1.emplace_back(-2);
-                        knittingMapLeft_1.emplace_back(j);
-                    }
-                else
-                    for(int k = 0;k<relatedNodeDown_new[i][j].size();k++)
-                    {
-                        knittingMapRight_1.emplace_back(-2);
-                        knittingMapLeft_1.emplace_back(j);
-                    }
-                buff++;
-                continue;
-            }
-            if(relatedNodeDown_new[i][j].size()==0&&i!=0)
-            {
-                if(j-buff-1<0)
-                    for(int k = 0;k<nodeLength[i][j];k++)
-                    {
-                        knittingMapLeft_1.emplace_back(-2);
-                        knittingMapRight_1.emplace_back(j);
-                    }
-                else
-                    for(int k = 0;k<nodeLength[i][j];k++)
-                    {
-                        knittingMapLeft_1.emplace_back(-2);
-                        knittingMapRight_1.emplace_back(j);
-                    }
-                buff++;
-                continue;
-            }
-            if(i==nodeLength.size()-1)
-            {
-                for(int k = 0;k<relatedNodeDown_new[i][j].size();k++)
-                {
-                    knittingMapRight_1.emplace_back(-2);
-                    knittingMapLeft_1.emplace_back(j);
-                }
-                buff++;
-                continue;
-            }
-            int upDown = 0;
-            if(relatedNodeDown_new[i][j].size()>nodeLength[i][j]&&i!=nodeLength.size()-1)
-            {
-
-                if(relatedNodeDown_new[i+1][relatedNodeUp_new[i][j][0]].size()>1)
-                    for(int k =0;k<relatedNodeDown_new[i+1][relatedNodeUp_new[i][j][0]].size();k++)
-                    {
-                        if(relatedNodeDown_new[i+1][relatedNodeUp_new[i][j][0]][k]==j) continue;
-                        if(relatedNodeDown_new[i+1][relatedNodeUp_new[i][j][0]][k]<j) upDown++;
-                        else upDown--;
-                    }
-                else if(relatedNodeDown_new[i+1][relatedNodeUp_new[i][j][0]].size()==1)
-                {
-                    if(relatedNodeUp_new[i][j][0]==0) upDown--;
-                    else if(relatedNodeUp_new[i][j][0]==relatedNodeDown_new[i+1].size()-1) upDown++;
-                }
-                if(upDown>0)
-                    for(int k = 0;k<relatedNodeDown_new[i][j].size();k++)
-                    {
-                        knittingMapLeft_1.emplace_back(j);
-                        if(j-buff-1<0)
-                            if(k!=0)
-                                knittingMapRight_1.emplace_back(-1);
-                            else
-                                knittingMapRight_1.emplace_back(j);
-                        else
-                            if(k!=0)
-                                knittingMapRight_1.emplace_back(-1);
-                            else
-                                knittingMapRight_1.emplace_back(j);
-
-                    }
-                else if(upDown<0)
-                    for(int k = 0;k<relatedNodeDown_new[i][j].size();k++)
-                    {
-                        knittingMapLeft_1.emplace_back(j);
-                        if(j-buff-1<0)
-                            if(k!=relatedNodeDown_new[i][j].size()-1)
-                                knittingMapRight_1.emplace_back(-1);
-                            else
-                                knittingMapRight_1.emplace_back(j);
-                        else
-                            if(k!=relatedNodeDown_new[i][j].size()-1)
-                                knittingMapRight_1.emplace_back(-1);
-                            else
-                                knittingMapRight_1.emplace_back(j);
-                    }
-                else
-                {
-                    for(int k = 0;k<relatedNodeDown_new[i][j].size();k++)
-                    {
-                        knittingMapLeft_1.emplace_back(j);
-                        knittingMapRight_1.emplace_back(j);
-                    }
-                    intension = true;
-                }
-            }
-            else
-                for(int k = 0;k<nodeLength[i][j];k++)
-                {
-                    knittingMapRight_1.emplace_back(j);
-                    knittingMapLeft_1.emplace_back(j);
-                }
-
-
-        }
-
-        knittingMapRight.emplace_back(knittingMapRight_1);
-        knittingMapLeft.emplace_back(knittingMapLeft_1);
-        for(int j = 0;j<knittingMapRight[i].size()-1;j++)
-        {
-            if(knittingMapRight[i][j]==-1&&knittingMapRight[i][j+1]==-1)
-                continue;
-            else if(knittingMapRight[i][j]==-1&&knittingMapRight[i][j+1]!=-1)
-                knittingMapRight[i][j]=knittingMapRight[i][j+1]-1;
-
-        }
-        for(int j = 0;j<knittingMapLeft[i].size();j++)
-        {
-            if(knittingMapLeft[i][j]==-1&&knittingMapLeft[i][j+1]==-1)
-                continue;
-            else if(knittingMapLeft[i][j]==-1&&knittingMapLeft[i][j+1]!=-1)
-                knittingMapLeft[i][j]=knittingMapLeft[i][j+1]-1;
-        }
-    }
-
-    int maxLength = 0;
-    for(int i = 0;i<knittingMapRight.size();i++)
-    {
-        if(knittingMapRight[i].size()>maxLength)
-            maxLength = knittingMapRight[i].size();
-    }
-    for(int i = 0;i<knittingMapRight.size();i++)
-    {
-        int initialLength = knittingMapRight[i].size();
-        if(initialLength<maxLength)
-            for(int j =0;j<maxLength-initialLength;j++)
-                knittingMapRight[i].emplace_back(-1);
-    }
-    for(int i = 0;i<knittingMapLeft.size();i++)
-    {
-        int initialLength = knittingMapLeft[i].size();
-        if(initialLength<maxLength)
-            for(int j =0;j<maxLength-initialLength;j++)
-                knittingMapLeft[i].emplace_back(-1);
-    }
-    qDebug()<<"---------------------Map---------------------";
-    for(int i =0;i<nodeLength.size();i++)
-    {
-        qDebug()<<i<<knittingMapLeft[i].size()<<knittingMapLeft[i];
-        qDebug()<<i<<knittingMapRight[i].size()<<knittingMapRight[i];
-    }
-    std::vector<std::vector<int>> result_1;
-    result_1.resize(knittingMapRight.size()-1);
-    for(int i=0;i<result_1.size();i++)
-    {
-        result_1[i].resize(maxLength-1);
-        for(int j = 0;j<result_1[i].size();j++)
-        {
-            int a = knittingMapRight[i][j];
-            int b = knittingMapRight[i][j+1];
-            int x = knittingMapLeft[i+1][j];
-            int y = knittingMapLeft[i+1][j+1];
-            if(a<0||b<0||x<0||y<0||(a==b&&x==y))
-            {
-                result_1[i][j]=0;
-                continue;
-            }
-            if(a==b||x==y)
-            {
-                result_1[i][j]=2;
-                continue;
-            }
-            result_1[i][j]=1;
-        }
-        //qDebug()<<i<<result_1[i];
-    }
-    result.resize(result_1[0].size());
-    for(int i =0;i<result.size();i++)
-    {
-        for(int j = 0;j<result_1.size();j++)
-            result[i].emplace_back(result_1[j][i]);
-       // qDebug()<<i<<result[i];
-    }
-
-    std::ofstream myout("../../knittingMapRight.txt");
-    for(int i =0;i<result.size();i++)
-    {
-        for(int j = 0;j<result[i].size();j++)
-        {
-            if(j==result[i].size()-1)
-                myout<<result[i][j];
-            else
-                myout<<result[i][j]<<" ";
-        }
-        myout<<std::endl;
-    }
-    myout.close();
-
-
+    qDebug()<<"Course Generation Completed";
     return true;
 }
 
@@ -1278,22 +829,22 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
                 std::vector<int> rNode_1;
                 for(int l = 0;l<relatedNode[i][j][k].size();l++)
                 {
-                    if(relatedNode[i][j][k][l][0]!=0&&i!=relatedNode.size()-1)
+                    if(i!=relatedNode.size()-1)
                     {
-                        rNode_1.emplace_back(relatedNode[i][j][k][l][1]+relatedNode[i+1][relatedNode[i][j][k][l][0]-1].size());
-                    }
-                    else if(relatedNode[i][j][k][l][0]!=0&&i==relatedNode.size()-1)
-                    {
-                        rNode_1.emplace_back(relatedNode[i][j][k][l][1]+relatedNode_assist[i][relatedNode[i][j][k][l][0]-1].size());
-                    }
-                    else
                         rNode_1.emplace_back(relatedNode[i][j][k][l][1]);
+                        for(int m = 0;m<relatedNode[i][j][k][l][0];m++)
+                            rNode_1[rNode_1.size()-1]+=relatedNode[i+1][m].size();
+                    }
+                    else if(i==relatedNode.size()-1)
+                        rNode_1.emplace_back();
                 }
                 rNode.emplace_back(rNode_1);
             }
         }
         relatedNodeUp_new.emplace_back(rNode);
+        //qDebug()<<i<<rNode;
     }
+    //qDebug()<<"++++++++++++++++++++++++++++++++++++";
     for(int i = 0;i<relatedNode_assist.size();i++)
     {
         std::vector<std::vector<int>> rNode;
@@ -1304,20 +855,23 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
                 std::vector<int> rNode_1;
                 for(int l = 0;l<relatedNode_assist[i][j][k].size();l++)
                 {
-                    if(relatedNode_assist[i][j][k][l][0]!=0 && i!=0)
-                        rNode_1.emplace_back(relatedNode_assist[i][j][k][l][1]+relatedNode_assist[i-1][relatedNode_assist[i][j][k][l][0]-1].size());
-                    else if(relatedNode_assist[i][j][k][l][0]!=0&&i==0)
+                    if(i!=0)
                     {
-                        rNode_1.emplace_back(relatedNode_assist[i][j][k][l][1]+relatedNode[i][relatedNode[i][j][k][l][0]-1].size());
-                    }
-                    else
                         rNode_1.emplace_back(relatedNode_assist[i][j][k][l][1]);
+                        for(int m = 0;m<relatedNode_assist[i][j][k][l][0];m++)
+                            rNode_1[rNode_1.size()-1]+=relatedNode_assist[i-1][m].size();
+                    }
+                    else if(i==0)
+                        rNode_1.emplace_back();
                 }
                 rNode.emplace_back(rNode_1);
             }
         }
         relatedNodeDown_new.emplace_back(rNode);
+        //qDebug()<<i<<rNode;
     }
+    //qDebug()<<"++++++++++++++++++++++++++++++++++++";
+
     //Delete isolated Node
     for(int i =0;i<relatedNodeUp_new.size();i++)
     {
@@ -1343,8 +897,9 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
                     if (relatedNodeUp_new[i][j][b] > relatedNodeUp_new[i][j][b + 1])
                         std::swap(relatedNodeUp_new[i][j][b], relatedNodeUp_new[i][j][b + 1]);
         }
-        //qDebug()<<relatedNodeUp_new[i];
+        //qDebug()<<i<<relatedNodeUp_new[i];
     }
+    //qDebug()<<"++++++++++++++++++++++++++++++++++++";
     for(int i =0;i<relatedNodeDown_new.size();i++)
     {
         for(int j = 0;j<relatedNodeDown_new[i].size();j++)
@@ -1356,6 +911,7 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
                     if (relatedNodeDown_new[i][j][b] > relatedNodeDown_new[i][j][b + 1])
                         std::swap(relatedNodeDown_new[i][j][b], relatedNodeDown_new[i][j][b + 1]);
         }
+        //qDebug()<<i<<relatedNodeUp_new[i];
     }
 
     //Travel the Node(Get all branch included the disappeared branch);
@@ -1377,13 +933,9 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
             std::set<int>s(nextNode.begin(), nextNode.end());
             nextNode.assign(s.begin(), s.end());
             nextNode_last.emplace_back(j);
-            if(relatedNodeDown_new[i][j].size()>1) branchNum[1]+=relatedNodeDown_new[i][j].size()-1;
-            if(relatedNodeUp_new[i][j].size()==0&&i!=relatedNodeUp_new.size()-1)
-            {
-                branchNum[1]+=1;
-                branchNum[2] =1;
-            }
-            else if(relatedNodeUp_new[i][j].size()==0&&i==relatedNodeUp_new.size()-1)
+            if(relatedNodeDown_new[i][j].size()>1)
+                branchNum[1]+=relatedNodeDown_new[i][j].size()-1;
+            if(relatedNodeUp_new[i][j].size()==0)
             {
                 branchNum[1]+=1;
                 branchNum[2] =1;
@@ -1391,10 +943,8 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
             for(int a =i+1;a<relatedNodeUp_new.size();a++)
             {
                 std::vector<int>nextNode_new;
-                nextNode_new.clear();
                 for(int k = 0;k<nextNode.size();k++)
                 {
-
                     if(relatedNodeUp_new[a][nextNode[k]].size()==0) branchNum[0]++;
                     if(relatedNodeDown_new[a][nextNode[k]].size()>1)
                     {
@@ -1435,7 +985,6 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
         }
         if(totalLength==firstLength) continue;
         std::vector<std::vector<int>>nodeLength_1;
-        //qDebug()<<"No."<<i;
         for(int j = 0;j<firstLength;j++)
         {
             int idx_last=0;
@@ -1596,7 +1145,7 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
             result_1[i][j]=1;
         }
     }
-    result.resize(result_1[0].size()+2);
+    result.resize(result_1[0].size()+2);   
 
     for(int i =0;i<result.size();i++)
     {
@@ -1624,7 +1173,6 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
         }
         qDebug()<<i<<result[i];
     }
-
     for(int i =0;i<result.size();i++)
     {
         result_double.emplace_back(result[i]);
@@ -1757,6 +1305,8 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
     myout_double.close();
 
     knittingMapArray = result_double;
+    //result.erase(result.begin());result.erase(result.end());
+    knittingMapArray = result;
     return true;
 }
 
@@ -1806,19 +1356,21 @@ void LP_Plugin_Singa_Knitting::FunctionalRender_L(QOpenGLContext *ctx, QSurface 
         {
             int sum = 0;int count = 0;
             for(int j = 0;j<isoCurveNode[i].size();j++)
-                sum+=isoCurveNode[i][j].size();
+                sum+=isoCurveNode[i][j].size();            
             for(int j = 0;j<isoCurveNode[i].size();j++)
             {
+                //sum = isoCurveNode[i][j].size();
                 for(int k = 0 ;k<isoCurveNode[i][j].size()-1;k++)
                 {
                     std::vector<float> path;
                     for(int l = 0;l<3;l++) path.push_back(isoCurveNode[i][j][k][l]);
                     for(int l = 0;l<3;l++) path.push_back(isoCurveNode[i][j][k+1][l]);
-                    mProgram->setUniformValue("v4_color", QVector4D( float((k+count)/float(sum))*1.0f, float((k+count)/float(sum))*1.0f, float((k+count)/float(sum))*1.0f, 1.0f ));
+                    mProgram->setUniformValue("v4_color", QVector4D( float((k+count+0.5)/float(sum))*1.0f, float((k+count+0.5)/float(sum))*1.0f, float((k+count+0.5)/float(sum))*1.0f, 1.0f ));
                     mProgram->setAttributeArray("a_pos",path.data(),3);
                     f->glDrawArrays(GL_LINE_STRIP, 0, GLsizei(2));
                 }
                 count+=isoCurveNode[i][j].size();
+                //count =0;
             }
         }
     }
@@ -2141,39 +1693,26 @@ bool LP_Plugin_Singa_Knitting::eventFilter(QObject *watched, QEvent *event)
                 }
                 else{//Select the entity vertices
                     auto c = _isMesh(mObject).lock();
+                    auto rb = g_GLSelector->RubberBand();
                     auto &&tmp = g_GLSelector->SelectPoints3D("Shade",
                                                         c->Mesh()->points()->data(),
                                                         c->Mesh()->n_vertices(),
-                                                        e->pos(), true);
-
-                    if ( !tmp.empty() && c->Mesh()->is_boundary(c->Mesh()->vertex_handle(tmp.front()))){
-                        auto &&pt_id = tmp.front();
-                        qDebug() << "Picked : " << tmp;
-                        if (Qt::ControlModifier & e->modifiers()){
-                            if ( !mPoints.contains(pt_id)){
+                                                        rb->pos()+rb->rect().center(), false,
+                                                        rb->width(), rb->height());
+                    if (!tmp.empty())
+                    {
+                        for (auto pt_id : tmp)
+                        {
+                            if (c->Mesh()->is_boundary(c->Mesh()->vertex_handle(pt_id)))
+                            {
+                                qDebug() << "Picked : " << pt_id;
+                                if (!mPoints.contains(pt_id))
                                 mPoints.insert(pt_id, mPoints.size());
+                                QString info(mObject.lock()->Uuid().toString());
+                                //for (auto &p : mPoints)   info += tr("%1\n").arg(p);
                             }
-                        }else if (Qt::ShiftModifier & e->modifiers()){
-                            if ( mPoints.contains(pt_id)){
-                                qDebug() << mPoints.take(pt_id);
-                            }
-                        }else{
-                            //mPoints.clear();
-                            //mPoints.insert(pt_id,0);
-                            if ( !mPoints.contains(pt_id))
-                            mPoints.insert(pt_id, mPoints.size());
                         }
-
-                        QString info(mObject.lock()->Uuid().toString());
-                        for ( auto &p : mPoints ){
-                            info += tr("%1\n").arg(p);
-                        }
-
-                        if (!mPoints.empty()){
-                            emit glUpdateRequest();
-                        }
-                        //printf("The mesh is %B\n",c.get()->Mesh()->has_vertex_status());
-                        //qDebug() << c.get()->Mesh()->vertex_handle(100).idx();
+                        if (!mPoints.empty())   emit glUpdateRequest();
                         return true;
                     }
                 }
