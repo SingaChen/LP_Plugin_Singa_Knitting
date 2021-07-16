@@ -1,7 +1,7 @@
 QT += gui widgets
 
 TEMPLATE = lib
-DEFINES += LP_PLUGIN_SINGA_KNITTING_LIBRARY _USE_MATH_DEFINES
+DEFINES += LP_PLUGIN_SINGA_KNITTING_LIBRARY _USE_MATH_DEFINES OPENNURBS_IMPORTS
 
 CONFIG += c++17
 
@@ -42,3 +42,9 @@ else:unix:!macx: LIBS += -L$$OUT_PWD/../Model/ -lModel
 
 INCLUDEPATH += $$PWD/../Model
 DEPENDPATH += $$PWD/../Model
+
+win32: LIBS += -L$$PWD/../../opennurbs/lib/ -lopennurbs_public
+else:unix:!macx: LIBS += -L$$PWD/../../opennurbs/lib/ -lopennurbs_public
+
+INCLUDEPATH += $$PWD/../../opennurbs/include
+DEPENDPATH += $$PWD/../../opennurbs/include
