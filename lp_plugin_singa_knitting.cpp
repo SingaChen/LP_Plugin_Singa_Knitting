@@ -1,11 +1,17 @@
 #include "lp_plugin_singa_knitting.h"
 #include "lp_renderercam.h"
+
+
+#include "opennurbs_public.h"
+
 //#include "lp_import_openmesh.h"
 #include "Commands/lp_commandmanager.h"
 #include "Commands/lp_cmd_import_opmesh.h"
 //#include "lp_pick_feature_points.h"
 #include "renderer/lp_glselector.h"
 #include "renderer/lp_glrenderer.h"
+
+
 #include <fstream>
 #include <QMessageBox>
 #include <QGroupBox>
@@ -28,7 +34,126 @@
 #include <QPainterPath>
 #include <QtConcurrent/QtConcurrent>
 
+ON_NurbsCurve createBezier(const QVector3D &p1, //Start Point
+                            const QVector3D &p2, //End Point
+                            const QVector3D &t1, //Tangent at p1
+                            const QVector3D &t2) //Tangent at p2
+{
+    ON_3dPointArray controlPoints;
+    controlPoints.AppendNew().Set(p1.x(), p1.y(), p1.z());
+    controlPoints.AppendNew().Set(3.0*(p1.x() + t1.x()),
+                                  3.0*(p1.y() + t1.y()),
+                                  3.0*(p1.z() + t1.z()));
+    controlPoints.AppendNew().Set(3.0*(p2.x() - t2.x()),
+                                  3.0*(p2.y() - t2.y()),
+                                  3.0*(p2.z() - t2.z()));
+    controlPoints.AppendNew().Set(p2.x(), p2.y(), p2.z());
 
+    ON_BezierCurve bcurve(controlPoints);
+    return ON_NurbsCurve(bcurve);
+}
+
+/**
+ * @brief interpolateBSpline create a NURBS curve by interpolation from pts with uniform knot vector
+ * @param pts points list
+ * @param deg of the Spline
+ * @return A interpolated NURBS curve from the input pts with deg
+ */
+ON_NurbsCurve interpolateBSpline(const std::vector<QVector3D> &pts, //List of points
+                                 const int deg = 3)
+{
+    ON_NurbsCurve curve;
+    if ( deg >= int(pts.size()) ) {
+        qWarning() << QString("Number of points (%1) should be > then deg (%2)")
+                      .arg(pts.size()).arg(deg);
+        return curve;
+    }
+    const int nPts = pts.size();
+    const int order = deg + 1;
+
+    const int nKnots = ON_KnotCount(order, nPts);
+    double knotEnd = nPts - order + 1;  //The last knot value (clamped)
+    std::vector<double> knots( nKnots );
+    std::vector<double> ts( nPts );
+
+    //Prepare knot vector
+    for ( int i=0; i<deg; ++i ) {
+        knots.at( i ) = 0.0;
+        knots.at( nKnots-i-1 ) =  knotEnd;
+    }
+
+    for ( int i=deg; i<nPts; ++i ) {
+        knots.at(i) = i - deg + 1;
+    }
+
+//#ifndef QT_NO_DEBUG
+//    qDebug() << knots;
+//#endif
+
+    const double deltaT = knotEnd / (nPts - 1);
+    for ( int i=1; i<nPts-1; ++i ) {
+        ts.at(i) = i*deltaT;
+    }
+    ts.at(0) = 0.0;
+    ts.at(nPts - 1) = knotEnd;
+
+//#ifndef QT_NO_DEBUG
+//    qDebug() << ts;
+//#endif
+
+    //Create the parametric value
+    std::vector<double> M( nPts * nPts ); //Square matrix
+    std::vector<double> N(order * order);
+
+    int row = 0;
+    for ( auto &t : ts ) {
+        int spanIndex = ON_NurbsSpanIndex(order, nPts, knots.data(), t, 0, 0 );
+        if ( !ON_EvaluateNurbsBasis(order, knots.data() + spanIndex, t, N.data())) {
+            qCritical() << "Nurbs basis error : " << t;
+            return curve;
+        }
+        memcpy(M.data() + row*nPts + spanIndex, N.data(), order * sizeof(double));
+        ++row;
+    }
+    N.clear();
+
+    //Prepare the input points
+    std::vector<ON_3dPoint> B(nPts), X(nPts);
+    for ( int i=0; i<nPts; ++i ) {
+        const auto &pt = pts.at(i);
+        B.at(i).Set( pt.x(), pt.y(), pt.z());
+    }
+
+    //For OpenNURBS C-style
+    double **M_ptr = new double*[nPts];
+    for ( int j=0; j<nPts; ++j ) {
+        M_ptr[j] = M.data() + j*nPts;
+    }
+
+    //Solve the system Ax=b
+    ON_Matrix on_M;
+    on_M.Create(nPts, nPts, M_ptr, false);
+    on_M.RowReduce(std::numeric_limits<double>::epsilon(),
+                   B.data());
+    bool rc = on_M.BackSolve(
+                std::numeric_limits<double>::epsilon(),
+                B.size(),
+                B.data(),
+                X.data());
+
+    delete[] M_ptr;
+    if ( !rc ) {
+        qWarning() << "Interpolation failed.";
+        return curve;
+    }
+
+    curve.CreateClampedUniformNurbs( 3, order, nPts, X.data());
+
+    return curve;
+}
+
+std::vector<QVector3D> gInterpolationPoints;
+ON_NurbsCurve gNurbs;
 
 LP_Plugin_Singa_Knitting::~LP_Plugin_Singa_Knitting()
 {
@@ -48,7 +173,6 @@ bool LP_Plugin_Singa_Knitting::Run()
 
 QWidget *LP_Plugin_Singa_Knitting::DockUi()
 {
-
     mWidget = std::make_shared<QWidget>();
 
     QVBoxLayout *layout = new QVBoxLayout(mWidget.get());
@@ -559,12 +683,12 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
                      v1.emplace_back(n2[k]-n0[k]);
             }
             //qDebug()<<"minDistance:"<<minDistance<<"isoLength:"<<isoLength;
-            if(minDistance>3*isoLength||i==isoCurveNode.size()-1)
+            if(minDistance>3*isoLength||i==int(isoCurveNode.size()-1))
             {
                 minDistance=99999.9;
-                for(int k = 0;k<isoCurveNode[i-1].size();k++)
+                for(int k = 0;k<int(isoCurveNode[i-1].size());k++)
                 {
-                    for(int l = 0;l<isoCurveNode[i-1][k].size();l++)
+                    for(int l = 0;l<int(isoCurveNode[i-1][k].size());l++)
                     {
                         std::vector<float> nextNode;
                         for(int m = 0;m<3;m++)
@@ -610,7 +734,7 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
     //step1: detect the first isoCurve which is conducted at the begining
     //step2: sort the rest isoCurves
     std::vector<std::vector<std::vector<int>>> nearestNodeIdx;
-    for(int i = 0;i<isoCurveNode.size();i++)
+    for(int i = 0;i<int(isoCurveNode.size());i++)
     {
         if(i ==0 || isoCurveNode[i].size()==1)
         {
@@ -624,14 +748,14 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
         else
         {
             std::vector<std::vector<int>> newIdx;
-            for(int j = 0;j<isoCurveNode[i].size();j++)
+            for(int j = 0;j<int(isoCurveNode[i].size());j++)
             {
                 std::vector<float>n0 = isoCurveNode[i][j][0];
                 std::vector<int> idx;
                 float minDistance = 9999.9;
-                for(int k = 0;k<isoCurveNode[i-1].size();k++)
+                for(int k = 0;k<int(isoCurveNode[i-1].size());k++)
                 {
-                    for(int l = 0;l<isoCurveNode[i-1][k].size();l++)
+                    for(int l = 0;l<int(isoCurveNode[i-1][k].size());l++)
                     {
                         std::vector<float> nextNode;
                         for(int m = 0;m<3;m++)
@@ -656,9 +780,9 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
         }
         //qDebug()<<"Before:"<<nearestNodeIdx[i];
         if(nearestNodeIdx[i].size()==1) continue;
-        for(int j=0;j<nearestNodeIdx[i].size()-1;j++)
+        for(int j=0;j<int(nearestNodeIdx[i].size())-1;j++)
         {
-            for(int k = 0;k<nearestNodeIdx[i].size()-1-j;k++)
+            for(int k = 0;k<int(nearestNodeIdx[i].size())-1-j;k++)
             {
                 if(nearestNodeIdx[i][k][0]>nearestNodeIdx[i][k+1][0])
                 {
@@ -667,9 +791,9 @@ bool LP_Plugin_Singa_Knitting::isoCurveGeneration()
                 }
             }
         }
-        for(int j=0;j<nearestNodeIdx[i].size()-1;j++)
+        for(int j=0;j<int(nearestNodeIdx[i].size()-1);j++)
         {
-            for(int k = 0;k<nearestNodeIdx[i].size()-1-j;k++)
+            for(int k = 0;k<int(nearestNodeIdx[i].size()-1-j);k++)
             {
                 if(nearestNodeIdx[i][k][0]==nearestNodeIdx[i][k+1][0] && nearestNodeIdx[i][k][1]>nearestNodeIdx[i][k+1][1])
                 {
@@ -691,15 +815,15 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
 
     relatedNode.resize(isoCurveNode_resampled.size());
     relatedNode_assist.resize(isoCurveNode_resampled.size());
-    for(int i =0;i<isoCurveNode_resampled.size();i++)
+    for(int i =0;i<int(isoCurveNode_resampled.size());i++)
     {
         relatedNode[i].resize(isoCurveNode_resampled[i].size());
         relatedNode_assist[i].resize(isoCurveNode_resampled[i].size());
-        for(int j =0;j<isoCurveNode_resampled[i].size();j++)
+        for(int j =0;j<int(isoCurveNode_resampled[i].size());j++)
         {
             relatedNode_assist[i][j].resize(isoCurveNode_resampled[i][j].size());
             relatedNode[i][j].resize(isoCurveNode_resampled[i][j].size());
-            for(int k = 0;k<isoCurveNode_resampled[i][j].size();k++)
+            for(int k = 0;k<int(isoCurveNode_resampled[i][j].size());k++)
             {
                 relatedNode_assist[i][j][k].resize(0);
                 relatedNode[i][j][k].resize(0);
@@ -707,14 +831,14 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
         }
     }
     //connect courses
-    for(int i =0; i<isoCurveNode_resampled.size();i++)
+    for(int i =0; i<int(isoCurveNode_resampled.size());i++)
     {
         //if(i==9) break;
-        for(int j = 0;j<isoCurveNode_resampled[i].size();j++)
+        for(int j = 0;j<int(isoCurveNode_resampled[i].size());j++)
         {
             if(i!=0)//connect downside
             {
-                for(int k = 0;k<isoCurveNode_resampled[i][j].size();k++)
+                for(int k = 0;k<int(isoCurveNode_resampled[i][j].size());k++)
                 {
                     if(relatedNode_assist[i][j][k].size()>0) continue;
                     std::vector<float>n0 = isoCurveNode_resampled[i][j][k];
@@ -723,9 +847,9 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
                     idx_self.emplace_back(j);
                     idx_self.emplace_back(k);
                     float minDistance = 3 * mDis->value();
-                    for(int jj = 0;jj<isoCurveNode_resampled[i-1].size();jj++)
+                    for(int jj = 0;jj<int(isoCurveNode_resampled[i-1].size());jj++)
                     {
-                        for(int kk = 0;kk<isoCurveNode_resampled[i-1][jj].size();kk++)
+                        for(int kk = 0;kk<int(isoCurveNode_resampled[i-1][jj].size());kk++)
                         {
                             //qDebug()<<jj<<kk;
                             std::vector<float> nextNode;
@@ -739,10 +863,10 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
                             bool isIntersection = false;
                             for(int jjj = 0;jjj<j+1 && !isIntersection;jjj++)
                             {
-                                for(int kkk = 0;kkk<isoCurveNode_resampled[i][jjj].size() && !isIntersection;kkk++)
+                                for(int kkk = 0;kkk<int(isoCurveNode_resampled[i][jjj].size()) && !isIntersection;kkk++)
                                 {
                                     if(jjj==j && kkk==k) break;
-                                    for(int l = 0;l<relatedNode_assist[i][jjj][kkk].size() && !isIntersection;l++)
+                                    for(int l = 0;l<int(relatedNode_assist[i][jjj][kkk].size()) && !isIntersection;l++)
                                         if(relatedNode_assist[i][jjj][kkk][l][0]>jj||(relatedNode_assist[i][jjj][kkk][l][0]==jj&&relatedNode_assist[i][jjj][kkk][l][1]>kk))
                                             isIntersection = true;
                                 }
@@ -765,10 +889,10 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
                     }
                 }
             }
-            if(i!=isoCurveNode_resampled.size()-1)//connect upside
+            if(i!=int(isoCurveNode_resampled.size())-1)//connect upside
             {
                 //qDebug()<<"-------------"<<i<<j<<"Up --------------";
-                for(int k = 0;k<isoCurveNode_resampled[i][j].size();k++)
+                for(int k = 0;k<int(isoCurveNode_resampled[i][j].size());k++)
                 {
                     std::vector<float>n0 = isoCurveNode_resampled[i][j][k];
                     std::vector<int> idx;
@@ -776,9 +900,9 @@ bool LP_Plugin_Singa_Knitting::courseGeneration()
                     idx_self.emplace_back(j);
                     idx_self.emplace_back(k);
                     float minDistance = 3*mDis->value();
-                    for(int jj = 0;jj<isoCurveNode_resampled[i+1].size();jj++)
+                    for(int jj = 0;jj<int(isoCurveNode_resampled[i+1].size());jj++)
                     {
-                        for(int kk = 0;kk<isoCurveNode_resampled[i+1][jj].size();kk++)
+                        for(int kk = 0;kk<int(isoCurveNode_resampled[i+1][jj].size());kk++)
                         {
                             std::vector<float> nextNode;
                             nextNode = isoCurveNode_resampled[i+1][jj][kk];
@@ -819,23 +943,23 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
     std::vector<std::vector<int>> result_double;
 
     //re-assign the relatedNode
-    for(int i = 0;i<relatedNode.size();i++)
+    for(int i = 0;i<int(relatedNode.size());i++)
     {
         std::vector<std::vector<int>> rNode;
-        for(int j = 0;j<relatedNode[i].size();j++)
+        for(int j = 0;j<int(relatedNode[i].size());j++)
         {
-            for(int k = 0;k<relatedNode[i][j].size();k++)
+            for(int k = 0;k<int(relatedNode[i][j].size());k++)
             {
                 std::vector<int> rNode_1;
-                for(int l = 0;l<relatedNode[i][j][k].size();l++)
+                for(int l = 0;l<int(relatedNode[i][j][k].size());l++)
                 {
-                    if(i!=relatedNode.size()-1)
+                    if(i!=int(relatedNode.size()-1))
                     {
                         rNode_1.emplace_back(relatedNode[i][j][k][l][1]);
                         for(int m = 0;m<relatedNode[i][j][k][l][0];m++)
                             rNode_1[rNode_1.size()-1]+=relatedNode[i+1][m].size();
                     }
-                    else if(i==relatedNode.size()-1)
+                    else if(i==int(relatedNode.size()-1))
                         rNode_1.emplace_back();
                 }
                 rNode.emplace_back(rNode_1);
@@ -845,15 +969,15 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
         //qDebug()<<i<<rNode;
     }
     //qDebug()<<"++++++++++++++++++++++++++++++++++++";
-    for(int i = 0;i<relatedNode_assist.size();i++)
+    for(int i = 0;i<int(relatedNode_assist.size());i++)
     {
         std::vector<std::vector<int>> rNode;
-        for(int j = 0;j<relatedNode_assist[i].size();j++)
+        for(int j = 0;j<int(relatedNode_assist[i].size());j++)
         {
-            for(int k = 0;k<relatedNode_assist[i][j].size();k++)
+            for(int k = 0;k<int(relatedNode_assist[i][j].size());k++)
             {
                 std::vector<int> rNode_1;
-                for(int l = 0;l<relatedNode_assist[i][j][k].size();l++)
+                for(int l = 0;l<int(relatedNode_assist[i][j][k].size());l++)
                 {
                     if(i!=0)
                     {
@@ -873,9 +997,9 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
     //qDebug()<<"++++++++++++++++++++++++++++++++++++";
 
     //Delete isolated Node
-    for(int i =0;i<relatedNodeUp_new.size();i++)
+    for(int i =0;i<int(relatedNodeUp_new.size());i++)
     {
-        for(int j = 0;j<relatedNodeUp_new[i].size();j++)
+        for(int j = 0;j<int(relatedNodeUp_new[i].size());j++)
         {
             if(relatedNodeUp_new[i][j].size()==0&&relatedNodeDown_new[i][j].size()==0)
             {
@@ -886,28 +1010,28 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
         }
     }
     //sort the Node
-    for(int i =0;i<relatedNodeUp_new.size();i++)
+    for(int i =0;i<int(relatedNodeUp_new.size());i++)
     {
-        for(int j = 0;j<relatedNodeUp_new[i].size();j++)
+        for(int j = 0;j<int(relatedNodeUp_new[i].size());j++)
         {
             if(relatedNodeUp_new[i][j].size()<=1) continue;
             int a, b;
-            for (a = 0; a < relatedNodeUp_new[i][j].size() - 1; a++)
-                for (b = 0; b < relatedNodeUp_new[i][j].size() - 1 - a; b++)
+            for (a = 0; a < int(relatedNodeUp_new[i][j].size() - 1); a++)
+                for (b = 0; b < int(relatedNodeUp_new[i][j].size() - 1 - a); b++)
                     if (relatedNodeUp_new[i][j][b] > relatedNodeUp_new[i][j][b + 1])
                         std::swap(relatedNodeUp_new[i][j][b], relatedNodeUp_new[i][j][b + 1]);
         }
         //qDebug()<<i<<relatedNodeUp_new[i];
     }
     //qDebug()<<"++++++++++++++++++++++++++++++++++++";
-    for(int i =0;i<relatedNodeDown_new.size();i++)
+    for(int i =0;i<int(relatedNodeDown_new.size());i++)
     {
-        for(int j = 0;j<relatedNodeDown_new[i].size();j++)
+        for(int j = 0;j<int(relatedNodeDown_new[i].size());j++)
         {
             if(relatedNodeDown_new[i][j].size()<=1) continue;
             int a, b;
-            for (a = 0; a < relatedNodeDown_new[i][j].size() - 1; a++)
-                for (b = 0; b < relatedNodeDown_new[i][j].size() - 1 - a; b++)
+            for (a = 0; a < int(relatedNodeDown_new[i][j].size() - 1); a++)
+                for (b = 0; b < int(relatedNodeDown_new[i][j].size() - 1 - a); b++)
                     if (relatedNodeDown_new[i][j][b] > relatedNodeDown_new[i][j][b + 1])
                         std::swap(relatedNodeDown_new[i][j][b], relatedNodeDown_new[i][j][b + 1]);
         }
@@ -916,10 +1040,10 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
 
     //Travel the Node(Get all branch included the disappeared branch);
     int firstLength = 0;
-    for(int i = 0;i<relatedNodeUp_new.size();i++)
+    for(int i = 0;i<int(relatedNodeUp_new.size());i++)
     {
         std::vector<std::vector<int>>nodeLength_1;
-        for(int j = 0;j<relatedNodeUp_new[i].size();j++)
+        for(int j = 0;j<int(relatedNodeUp_new[i].size());j++)
         {
             std::vector<int> branchNum;
             branchNum.resize(3);
@@ -928,7 +1052,7 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
             branchNum[2]=0;
             std::vector<int>nextNode;
             std::vector<int>nextNode_last;
-            for(int k = 0;k<relatedNodeUp_new[i][j].size();k++)
+            for(int k = 0;k<int(relatedNodeUp_new[i][j].size());k++)
                 nextNode.emplace_back(relatedNodeUp_new[i][j][k]);
             std::set<int>s(nextNode.begin(), nextNode.end());
             nextNode.assign(s.begin(), s.end());
@@ -940,24 +1064,24 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
                 branchNum[1]+=1;
                 branchNum[2] =1;
             }
-            for(int a =i+1;a<relatedNodeUp_new.size();a++)
+            for(int a =i+1;a<int(relatedNodeUp_new.size());a++)
             {
                 std::vector<int>nextNode_new;
-                for(int k = 0;k<nextNode.size();k++)
+                for(int k = 0;k<int(nextNode.size());k++)
                 {
                     if(relatedNodeUp_new[a][nextNode[k]].size()==0) branchNum[0]++;
                     if(relatedNodeDown_new[a][nextNode[k]].size()>1)
                     {
-                        for(int l = 0;l<relatedNodeDown_new[a][nextNode[k]].size();l++)
+                        for(int l = 0;l<int(relatedNodeDown_new[a][nextNode[k]].size());l++)
                         {
-                            for(int m = 0;m<nextNode_last.size();m++)
+                            for(int m = 0;m<int(nextNode_last.size());m++)
                             {
                                 if(nextNode_last[m]==relatedNodeDown_new[a][nextNode[k]][l]) branchNum[0]++;
                             }
                         }
                         branchNum[0]--;
                     }
-                    for(int l = 0;l<relatedNodeUp_new[a][nextNode[k]].size();l++)
+                    for(int l = 0;l<int(relatedNodeUp_new[a][nextNode[k]].size());l++)
                         nextNode_new.emplace_back(relatedNodeUp_new[a][nextNode[k]][l]);
                 }
                 std::set<int>s1(nextNode_new.begin(), nextNode_new.end());
@@ -970,15 +1094,15 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
             nodeLength_1.emplace_back(branchNum);
         }
         if(i==0)
-            for(int j = 0;j<nodeLength_1.size();j++)
+            for(int j = 0;j<int(nodeLength_1.size());j++)
                 firstLength+=nodeLength_1[j][0];
         nodeLength.emplace_back(nodeLength_1);
     }
-    for(int i = 0;i<relatedNodeUp_new.size();i++)
+    for(int i = 0;i<int(relatedNodeUp_new.size());i++)
     {
         int idx_node= 0;
         int totalLength= 0;
-        for(int j = 0;j<nodeLength[i].size();j++)
+        for(int j = 0;j<int(nodeLength[i].size());j++)
         {
             totalLength+=nodeLength[i][j][0];
             totalLength+=nodeLength[i][j][1];
@@ -993,7 +1117,7 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
             branchNum_last.resize(3);
             branchNum_last[0]=999;
             bool isFound = false;
-            for(int k=0;k<nodeLength[i-1].size();k++)
+            for(int k=0;k<int(nodeLength[i-1].size());k++)
             {
                 for(int l = 0;l<nodeLength[i-1][k][0];l++)
                 {
@@ -1026,12 +1150,12 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
                     break;
                 }
             }
-            if(idx_node>nodeLength[i].size()-1)
+            if(idx_node>int(nodeLength[i].size()-1))
             {
                 std::vector<int> lastBranchNum;
                 lastBranchNum.resize(3);
                 lastBranchNum[0] = 0;
-                for(int k = 0;k<nodeLength_1.size();k++)
+                for(int k = 0;k<int(nodeLength_1.size());k++)
                 {
                     lastBranchNum[1]+=nodeLength_1[k][0]+nodeLength_1[k][1];
                 }
@@ -1056,7 +1180,7 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
                 if(relatedNodeDown_new[i][idx_node].size()>1)
                 {
                     nodeLength_2[1]+=relatedNodeDown_new[i][idx_node].size()-1;
-                    for(int k = 0;k<relatedNodeDown_new[i][idx_node].size();k++)
+                    for(int k = 0;k<int(relatedNodeDown_new[i][idx_node].size());k++)
                     {
                         if(nodeLength[i-1][idx_last_node+k][2]==0)
                         {
@@ -1065,12 +1189,12 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
                         }
                     }
                 }
-                if(relatedNodeUp_new[i][idx_node].size()==0&&i!=relatedNodeUp_new.size())
+                if(relatedNodeUp_new[i][idx_node].size()==0&&i!=int(relatedNodeUp_new.size()))
                 {
                     nodeLength_2[1]+=1;
                     nodeLength_2[2] = 1;
                 }
-                else if(relatedNodeUp_new[i][idx_node].size()==0&&i==relatedNodeUp_new.size())
+                else if(relatedNodeUp_new[i][idx_node].size()==0&&i==int(relatedNodeUp_new.size()))
                 {
                     nodeLength_2[1]+=1;
                     nodeLength_2[2] = 1;
@@ -1089,23 +1213,23 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
         nodeLength.insert(nodeLength.begin()+i,nodeLength_1);
 
     }
-    for(int i = 0;i<relatedNodeUp_new.size();i++)
+    for(int i = 0;i<int(relatedNodeUp_new.size());i++)
     {
         int totalLength= 0;
-        for(int j = 0;j<nodeLength[i].size();j++)
+        for(int j = 0;j<int(nodeLength[i].size());j++)
         {
             totalLength+=nodeLength[i][j][0];
             totalLength+=nodeLength[i][j][1];
         }
         qDebug()<<i<<nodeLength[i]<<totalLength;
     }
-    for(int i = 0;i<nodeLength.size();i++)
+    for(int i = 0;i<int(nodeLength.size());i++)
     {
         int idx = 0;
         std::vector<int> knittingMap_1;
-        for(int j = 0;j<nodeLength[i].size();j++)
+        for(int j = 0;j<int(nodeLength[i].size());j++)
         {
-            if(j == nodeLength[i].size()-1&&nodeLength[i][j][0]==0)
+            if(j == int(nodeLength[i].size()-1)&&nodeLength[i][j][0]==0)
                 for(int k = 0;k<nodeLength[i][j][0]+nodeLength[i][j][1];k++)
                 {
                     knittingMap_1.emplace_back(knittingMap_1[knittingMap_1.size()-1]);
@@ -1123,10 +1247,10 @@ bool LP_Plugin_Singa_Knitting::knittingMapgeneration_new()
     }
     std::vector<std::vector<int>> result_1;
     result_1.resize(knittingMap.size()-1);
-    for(int i=0;i<result_1.size();i++)
+    for(int i=0;i<int(result_1.size());i++)
     {
         result_1[i].resize(firstLength-1);
-        for(int j = 0;j<result_1[i].size();j++)
+        for(int j = 0;j<int(result_1[i].size());j++)
         {
             int a = knittingMap[i][j];
             int b = knittingMap[i][j+1];
@@ -1604,11 +1728,11 @@ void LP_Plugin_Singa_Knitting::FunctionalRender_R(QOpenGLContext *ctx, QSurface 
     r = 0.3f;g=0.3f;b=0.3f;
     mProgram->setUniformValue("v4_color", QVector4D(r, g, b, 1.0f));
     std::vector<QVector3D> l;
-    for ( int i=0; i<=knittingMapArray[0].size(); ++i ){
+    for ( int i=0; i<=int(knittingMapArray[0].size()); ++i ){
         l.emplace_back(QVector3D( hStep*i - 1.0f, 1.0f, 0.1f ));
         l.emplace_back(QVector3D( hStep*i - 1.0f, -1.0f, 0.1f ));
     }
-    for ( int j=0; j<=knittingMapArray.size(); ++j ){//Horizontal
+    for ( int j=0; j<=int(knittingMapArray.size()); ++j ){//Horizontal
         l.emplace_back(QVector3D( -1.0f, j*vStep - 1.0f, 0.1f ));
         l.emplace_back(QVector3D( 1.0f, j*vStep - 1.0f, 0.1f ));
     }
@@ -1618,9 +1742,9 @@ void LP_Plugin_Singa_Knitting::FunctionalRender_R(QOpenGLContext *ctx, QSurface 
     std::vector<QVector3D> poly_red;
     std::vector<QVector3D> poly_blue;
     std::vector<QVector3D> poly_na;
-    for(int i = 0;i<knittingMapArray.size();i++)
+    for(int i = 0;i<int(knittingMapArray.size());i++)
     {
-        for(int j = 0;j<knittingMapArray[i].size();j++)
+        for(int j = 0;j<int(knittingMapArray[i].size());j++)
         {
             if(knittingMapArray[i][j]==2)
             {
@@ -1680,6 +1804,13 @@ bool LP_Plugin_Singa_Knitting::eventFilter(QObject *watched, QEvent *event)
         if ( QEvent::MouseButtonRelease == event->type()){
             auto e = static_cast<QMouseEvent*>(event);
             if ( e->button() == Qt::LeftButton ){
+
+                gInterpolationPoints.push_back(QVector3D(e->pos()));
+                emit glUpdateRequest();
+                if ( gInterpolationPoints.size() > 3 ) {
+                    gNurbs = interpolateBSpline(gInterpolationPoints);
+                }
+
                 if (!mObject.lock()){
                     auto &&objs = g_GLSelector->SelectInWorld("Shade",e->pos());
                     for ( auto &o : objs ){
@@ -1716,6 +1847,10 @@ bool LP_Plugin_Singa_Knitting::eventFilter(QObject *watched, QEvent *event)
                         return true;
                     }
                 }
+            } else {
+                gInterpolationPoints.clear();
+                gNurbs.Destroy();
+                emit glUpdateRequest();
             }
         }
     }
@@ -1730,7 +1865,56 @@ void LP_Plugin_Singa_Knitting::ResetSelection()
 void LP_Plugin_Singa_Knitting::PainterDraw(QWidget *glW)
 {
     if(!selectMode) return;
-    if ( "openGLWidget_2" == glW->objectName()){
+    if ( "window_Normal" == glW->objectName()){
+
+        if ( !gInterpolationPoints.empty()) {
+            QPainter painter(glW);
+            QPen pen;
+
+            if ( gNurbs.IsValid()) {    //Draw the curve
+                constexpr int nSamples = 200;
+                double deltaT = gNurbs.Domain().Length() / nSamples;
+                pen.setColor(qRgb(200,200,60));
+                pen.setWidth(3);
+                pen.setStyle(Qt::SolidLine);
+                painter.setPen(pen);
+                auto p0 = gNurbs.PointAtStart();
+                for ( int i=1; i<nSamples; ++i ) {
+                    auto &&p = gNurbs.PointAt( i*deltaT );
+                    painter.drawLine(p0.x, p0.y, p.x, p.y);
+                    p0 = p;
+                }
+                painter.drawLine(p0.x, p0.y, gNurbs.PointAtEnd().x, gNurbs.PointAtEnd().y);
+
+                const int nCVs = gNurbs.CVCount();
+                pen.setStyle(Qt::DashDotLine);
+                pen.setColor(qRgb(200, 180, 30));
+                pen.setWidth(2);
+                painter.setPen(pen);
+                p0 = gNurbs.CV(0);
+                for ( int i=1; i<nCVs; ++i ) {
+                    auto cv = gNurbs.CV(i);
+                    painter.drawLine(p0.x, p0.y, *cv, *(cv+1));
+                    p0 = cv;
+                }
+
+                pen.setColor(qRgb(255,255,0));
+                pen.setWidth(10);
+                painter.setPen(pen);
+                for ( int i=0; i<nCVs; ++i ) {
+                    auto cv = gNurbs.CV(i);
+                    painter.drawPoint(*cv, *(cv+1));
+                }
+            }
+            //The click points
+            pen.setColor(qRgb(0,255,255));
+            pen.setWidth(3);
+            painter.setPen(pen);
+            for ( auto &p : gInterpolationPoints ) {
+                painter.drawPoint(p.x(), p.y());    //
+            }
+        }
+
         return;
     }
     if ( !mCam.lock() || !mObject.lock()){
