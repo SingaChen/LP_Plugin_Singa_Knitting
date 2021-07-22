@@ -37,17 +37,26 @@
 ON_NurbsCurve createBezier(const QVector3D &p1, //Start Point
                             const QVector3D &p2, //End Point
                             const QVector3D &t1, //Tangent at p1
-                            const QVector3D &t2) //Tangent at p2
+                            const QVector3D &t2, //Tangent at p2
+                            double scale = 1.0 ) //Magnitude of tangents
 {
+    constexpr double inv3 = 1.0 / 3.0;
+    scale *= inv3;
     ON_3dPointArray controlPoints;
     controlPoints.AppendNew().Set(p1.x(), p1.y(), p1.z());
-    controlPoints.AppendNew().Set(3.0*(p1.x() + t1.x()),
-                                  3.0*(p1.y() + t1.y()),
-                                  3.0*(p1.z() + t1.z()));
-    controlPoints.AppendNew().Set(3.0*(p2.x() - t2.x()),
-                                  3.0*(p2.y() - t2.y()),
-                                  3.0*(p2.z() - t2.z()));
+    controlPoints.AppendNew().Set(p1.x() + scale*t1.x(),
+                                  p1.y() + scale*t1.y(),
+                                  p1.z() + scale*t1.z());
+    controlPoints.AppendNew().Set(p2.x() - scale*t2.x(),
+                                  p2.y() - scale*t2.y(),
+                                  p2.z() - scale*t2.z());
     controlPoints.AppendNew().Set(p2.x(), p2.y(), p2.z());
+
+    qDebug() << p1 << p2 << t1 << t2;
+    qDebug() << controlPoints.At(0)->x << ", " << controlPoints.At(0)->y << ") "
+             << controlPoints.At(1)->x << ", " << controlPoints.At(1)->y << ") "
+             << controlPoints.At(2)->x << ", " << controlPoints.At(2)->y << ") "
+             << controlPoints.At(3)->x << ", " << controlPoints.At(3)->y << ") ";
 
     ON_BezierCurve bcurve(controlPoints);
     return ON_NurbsCurve(bcurve);
@@ -1807,8 +1816,13 @@ bool LP_Plugin_Singa_Knitting::eventFilter(QObject *watched, QEvent *event)
 
                 gInterpolationPoints.push_back(QVector3D(e->pos()));
                 emit glUpdateRequest();
-                if ( gInterpolationPoints.size() > 3 ) {
-                    gNurbs = interpolateBSpline(gInterpolationPoints);
+                if ( gInterpolationPoints.size() == 4 ) {
+//                    gNurbs = interpolateBSpline(gInterpolationPoints);
+                    gNurbs = createBezier(gInterpolationPoints.at(0),
+                                          gInterpolationPoints.at(3),
+                                          gInterpolationPoints.at(1) - gInterpolationPoints.at(0),
+                                          gInterpolationPoints.at(3) - gInterpolationPoints.at(2),
+                                          3.0);
                 }
 
                 if (!mObject.lock()){
